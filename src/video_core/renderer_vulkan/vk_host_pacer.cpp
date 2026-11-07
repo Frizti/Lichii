@@ -3,6 +3,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cwchar>
+#include <vector>
 
 #include "common/logging.h"
 #include "video_core/nx2_debug_control.h"
@@ -23,10 +25,58 @@ using Ms = std::chrono::duration<double, std::milli>;
 Ns ToNs(double ns) {
     return Ns{static_cast<s64>(ns)};
 }
+
+#ifdef _WIN32
+/// Refresh period of the display whose GDI device name is `device`.
+std::optional<double> MonitorRefreshPeriodNs(const wchar_t* device) {
+    UINT32 path_count = 0;
+    UINT32 mode_count = 0;
+    if (GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &path_count, &mode_count) ==
+        ERROR_SUCCESS) {
+        std::vector<DISPLAYCONFIG_PATH_INFO> paths(path_count);
+        std::vector<DISPLAYCONFIG_MODE_INFO> modes(mode_count);
+        if (QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &path_count, paths.data(), &mode_count,
+                               modes.data(), nullptr) == ERROR_SUCCESS) {
+            for (UINT32 i = 0; i < path_count; ++i) {
+                DISPLAYCONFIG_SOURCE_DEVICE_NAME source{};
+                source.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+                source.header.size = sizeof(source);
+                source.header.adapterId = paths[i].sourceInfo.adapterId;
+                source.header.id = paths[i].sourceInfo.id;
+                const auto& rate = paths[i].targetInfo.refreshRate;
+                if (DisplayConfigGetDeviceInfo(&source.header) == ERROR_SUCCESS &&
+                    std::wcscmp(source.viewGdiDeviceName, device) == 0 && rate.Numerator != 0 &&
+                    rate.Denominator != 0) {
+                    return 1e9 * rate.Denominator / rate.Numerator;
+                }
+            }
+        }
+    }
+    DEVMODEW mode{};
+    mode.dmSize = sizeof(mode);
+    if (EnumDisplaySettingsW(device, ENUM_CURRENT_SETTINGS, &mode) &&
+        mode.dmDisplayFrequency > 1) {
+        return 1e9 / mode.dmDisplayFrequency;
+    }
+    return std::nullopt;
+}
+#endif
 } // Anonymous namespace
 
-std::optional<double> QueryRefreshPeriodNs() {
+std::optional<double> QueryRefreshPeriodNs(void* window) {
 #ifdef _WIN32
+    // DWM reports the primary display's timing only: a window on another display uses that
+    // display's mode.
+    const HMONITOR monitor =
+        window ? MonitorFromWindow(static_cast<HWND>(window), MONITOR_DEFAULTTONULL) : nullptr;
+    if (monitor != nullptr) {
+        MONITORINFOEXW monitor_info{};
+        monitor_info.cbSize = sizeof(monitor_info);
+        if (GetMonitorInfoW(monitor, &monitor_info) &&
+            (monitor_info.dwFlags & MONITORINFOF_PRIMARY) == 0) {
+            return MonitorRefreshPeriodNs(monitor_info.szDevice);
+        }
+    }
     DWM_TIMING_INFO info{};
     info.cbSize = sizeof(info);
     if (SUCCEEDED(DwmGetCompositionTimingInfo(nullptr, &info)) &&
@@ -66,10 +116,11 @@ void HostPacer::NoteQueued(Clock::time_point queued) {
     last_queued = queued;
 }
 
-void HostPacer::Refresh(Clock::time_point now, bool allowed) {
+void HostPacer::Refresh(Clock::time_point now, bool allowed, void* window) {
     if (now >= next_refresh_query) {
         next_refresh_query = now + std::chrono::seconds{2};
-        if (const auto period = QueryRefreshPeriodNs(); period && *period > 2e6 && *period < 50e6) {
+        if (const auto period = QueryRefreshPeriodNs(window);
+            period && *period > 2e6 && *period < 50e6) {
             if (!refresh_known || std::abs(*period - refresh_ns) > refresh_ns * 0.01) {
                 LOG_INFO(Render_Vulkan, "Host pacing: display refresh {:.4f} Hz", 1e9 / *period);
                 vblank.reset();

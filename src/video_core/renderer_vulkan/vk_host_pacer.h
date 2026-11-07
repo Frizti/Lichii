@@ -36,8 +36,9 @@ public:
         return pacing;
     }
 
-    /// Re-reads the switch and the display's refresh period now and then.
-    void Refresh(Clock::time_point now, bool allowed);
+    /// Re-reads the switch and the refresh period of the display showing `window` (native
+    /// handle, may be null) now and then.
+    void Refresh(Clock::time_point now, bool allowed, void* window);
 
     /// When the next frame should be handed to the swapchain; `now` or earlier = at once.
     [[nodiscard]] Clock::time_point Target(Clock::time_point now);
@@ -96,7 +97,8 @@ private:
     double interval_sum_ms{}, interval_max_ms{}, hold_sum_ms{}, latency_sum_ms{};
 };
 
-/// The display refresh period from the OS compositor (Windows); nullopt elsewhere or on failure.
-[[nodiscard]] std::optional<double> QueryRefreshPeriodNs();
+/// The refresh period of the display showing `window` (Windows; the primary display when null);
+/// nullopt elsewhere or on failure.
+[[nodiscard]] std::optional<double> QueryRefreshPeriodNs(void* window);
 
 } // namespace Vulkan
